@@ -1,5 +1,6 @@
 #include "include/lexer.h"
 #include "include/parse.h"
+#include "include/std.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -18,6 +19,9 @@ typedef struct Tokens {
     StarToken* tokens;
 } Tokens;
 
+#define ADVANCE(str,line,col) do{ char ch = *(str); (str)++; if (ch == '\n') { (line)++; (col) = 1; } else (col)++; }while(0)
+#define ADVANCE_N(str,n, line,col) for (size_t _x_ = 0; _x_ < (n); _x_++) { ADVANCE(str,line,col); }
+
 #define TK_APPEND(tokensPtr, ...) do {\
         if ((tokensPtr)->tokenCount + 1 >= (tokensPtr)->tokenCapacity) {\
             size_t newCapacity = (tokensPtr)->tokenCapacity * 2;\
@@ -31,7 +35,44 @@ typedef struct Tokens {
         (tokensPtr)->tokens[(tokensPtr)->tokenCount++] = __VA_ARGS__;\
     } while (0)
 
-int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t* outNtokens) {
+static inline bool _outExpectError(StarToken tk, StarTokenType type) {
+    if (tk.type != type) {
+        fprintf(stderr, "[%s:%zu] "TERM_RED"ERROR"TERM_RESET": Expected token %i, but got %i\n", tk.file, tk.line, (type), (tk).type);
+        return true;
+    }
+    return false;
+}
+#define EXPECT(token, type) _outExpectError(token, type)
+
+/**
+  * Compare two tokens, returning 0 when they are equal
+  * This protects against matching partial words:
+  * like matching does to do, which strncmp would do
+  * and using strcmp would always return false (length will almost always be different)
+  *
+  * This assumes token to always be a valid string (and not something like a space)!
+  */
+static inline int tokenStrCmp(const char* s, const char* token) {
+
+    /* strcmp */
+    while (*s && *token) {
+        if (*s != *token) return -1;
+        s++;
+        token++;
+    }
+    
+    /**
+      * This protects from matching does to do.
+      * Because: if the matchee continues with a valid identifier character,
+      * then it must be an extension of the matchee, and thus should not
+      * match with the matchee.
+    */
+    if (*s && !*token) return !isalnum(*s) && *s != '_' ? 0 : -1;
+
+    return 0; /* Equal! */
+}
+
+int StarLexicalize(const char* str, size_t maxStr, const char* debugFileName, StarToken** outTokens, size_t* outNtokens) {
     if (!str || maxStr == 0) return 0;
     
     Tokens tks = {
@@ -46,246 +87,261 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
         max = str + strlen(str);
     }
 
+    size_t line = 1;
+    size_t col =  1;
+
     /* Track text we don't care about. Flushed and set to NULL if we matched with anything */
     const char* miscTextBegin = NULL;
+
     while (*str && str < max)
     {
-        while (isspace(*str) && *str && str < max) str++;
+        while (isspace(*str) && *str && str < max) ADVANCE(str,line,col);
+        if (str >= max || !*str) break;
 
-        if (*str == '#') {
-            /* Don't flush Misc */
-            if (!miscTextBegin) miscTextBegin = str;
-            
-            str++;
-
-            while (*str && *str != '\n' && *str != '\r') {
-                str++;
-                if (*str == '\\') {
-                    str++;
-                    while (isspace(*str) && str && str < max) str++;
-                    str--;
-                }
-            }
-            str++; // \n
-            while (isspace(*str) && *str && str < max) str++;
-        }
-
-        else if (*str == ';')
-        {
-            if (miscTextBegin != NULL) {
-                const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
-                
-                miscTextBegin = NULL;
-            }
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_SEMI_COLON });
-            str++;
-        }
-        else if (*str == '(')
-        {
-            if (miscTextBegin != NULL) {
-                const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
-                
-                miscTextBegin = NULL;
-            }
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_OPEN_PAREN });
-            str++;
-        }
-        else if (*str == ')')
-        {
-            if (miscTextBegin != NULL) {
-                const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
-                
-                miscTextBegin = NULL;
-            }
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_CLOSE_PAREN });
-            str++;
-        }
-        else if (*str == '{')
-        {
-            if (miscTextBegin != NULL) {
-                const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
-                
-                miscTextBegin = NULL;
-            }
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_OPEN_BRACE });
-            str++;
-        }
-        else if (*str == '}')
-        {
-            if (miscTextBegin != NULL) {
-                const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
-                
-                miscTextBegin = NULL;
-            }
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_CLOSE_BRACE });
-            str++;
-        }
-        
-        else if (strncmp(str, "break", 5) == 0)
-        {
-            if (miscTextBegin != NULL) {
-                const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
-                
-                miscTextBegin = NULL;
-            }
-            
-            str += 5;
-            while (*str && isspace(*str)) str++;
-
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_BREAK });
-        }
-        
-        else if (strncmp(str, "continue", strlen("continue")) == 0)
-        {
-            if (miscTextBegin != NULL) {
-                const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
-                
-                miscTextBegin = NULL;
-            }
-            
-            str += strlen("continue");
-            while (*str && isspace(*str)) str++;
-            
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_CONTINUE });
-        }
-        
-        else if (strncmp(str, "return", strlen("return")) == 0)
-        {
-            if (miscTextBegin != NULL) {
-                const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
-                
-                miscTextBegin = NULL;
-            }
-
-            str += strlen("return");
-            while (*str && isspace(*str)) str++;
-
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_RETURN });
-        }
-        
-        else if (*str == '"') {
-            /* Don't flush Misc */
+        if (strncmp(str, "//", 2) == 0) {
             if (!miscTextBegin) miscTextBegin = str;
 
-            str++;
-            while (*str && str < max) {
-                if (*str == '\\' && (str+1) < max) {
-                    str++;
-                }
-                str++;
-                if (*str == '"') {
-                    break;
-                }
-            }
-            str++;
-        }
-        else if (strncmp(str, "//", 2) == 0) {
-            /* Don't flush Misc */
-            if (!miscTextBegin) miscTextBegin = str;
-            
-            str += 2;
+            ADVANCE_N(str,2,line,col);
 
-            while (*str && *str != '\n' && *str != '\r') str++;
-            while (*str && isspace(*str)) str++;
+            while (*str && *str != '\n') ADVANCE(str,line,col);
+            while (*str && isspace(*str)) ADVANCE(str,line,col);
         }
         else if (strncmp(str, "/*", 2) == 0) {
-            /* Don't flush Misc */
+            // if (miscTextBegin != NULL) {
+            //     const char *miscTextEnd = str;
+            //     TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+            //     miscTextBegin = NULL;
+            // }
             if (!miscTextBegin) miscTextBegin = str;
             
-            str += 2;
+            ADVANCE_N(str,2,line,col);
 
             i64 depth = 0;
             while (*str) {
                 if (strncmp(str, "*/", 2) == 0) {
-                    str++;
-                    str++;
+                    ADVANCE(str,line,col);
+                    ADVANCE(str,line,col);
                     if (depth == 0) break;
                     else depth--;
                 }
                 else if (strncmp(str, "/*", 2) == 0) {
                     depth++;
-                    str++;
-                    str++;
+                    ADVANCE(str,line,col);
+                    ADVANCE(str,line,col);
                 }
-                else str++;
+                else ADVANCE(str,line,col);
             }
-            while (*str && isspace(*str)) str++;
+            fprintf(stderr,"PISS: %c\n", *str);
+            while (*str && isspace(*str)) ADVANCE(str,line,col);
         }
-        
-        else if (strncmp(str, "for", 3) == 0) {
+        else if (*str == '"') {
+            /**
+              * Extend the misc selection to include
+              * this string
+              */
+            if (!miscTextBegin) miscTextBegin = str;
+            
+            ADVANCE(str,line,col);
+
+            while (*str && *str != '"' && str < max) {
+                if (*str == '\\' && (str+1) < max) {
+                    ADVANCE(str,line,col);
+                }
+                ADVANCE(str,line,col);
+                if (*str == '"') {
+                    break;
+                }
+            }
+            ADVANCE(str,line,col);
+        }
+        else if (*str == '#') {
+            /* Don't flush Misc */
+            if (!miscTextBegin) miscTextBegin = str;
+            
+            ADVANCE(str,line,col); // #
+
+            while (*str && *str != '\n' && *str != '\r') {
+                ADVANCE(str,line,col);
+                if (*str == '\\') {
+                    ADVANCE(str,line,col);
+                    while (isspace(*str) && str && str < max) ADVANCE(str,line,col);
+                }
+            }
+            while (isspace(*str) && *str && str < max) ADVANCE(str,line,col); // \n
+        }
+        else if (*str == ';')
+        {
             if (miscTextBegin != NULL) {
                 const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+                miscTextBegin = NULL;
+            }
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_SEMI_COLON, .line = line, .column = col, .file = debugFileName  });
+            ADVANCE(str,line,col);
+        }
+        else if (*str == '(')
+        {
+            if (miscTextBegin != NULL) {
+                const char *miscTextEnd = str;
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+                miscTextBegin = NULL;
+            }
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_OPEN_PAREN, .line = line, .column = col, .file = debugFileName  });
+            ADVANCE(str,line,col);
+        }
+        else if (*str == ')')
+        {
+            if (miscTextBegin != NULL) {
+                const char *miscTextEnd = str;
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+                miscTextBegin = NULL;
+            }
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_CLOSE_PAREN, .line = line, .column = col, .file = debugFileName  });
+            ADVANCE(str,line,col);
+        }
+        else if (*str == '{')
+        {
+            if (miscTextBegin != NULL) {
+                const char *miscTextEnd = str;
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+                miscTextBegin = NULL;
+            }
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_OPEN_BRACE, .line = line, .column = col, .file = debugFileName  });
+            ADVANCE(str,line,col);
+        }
+        else if (*str == '}')
+        {
+            if (miscTextBegin != NULL) {
+                const char *miscTextEnd = str;
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+                miscTextBegin = NULL;
+            }
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_CLOSE_BRACE, .line = line, .column = col, .file = debugFileName  });
+            ADVANCE(str,line,col);
+        }
+        
+        else if (tokenStrCmp(str, "break") == 0)
+        {
+            if (miscTextBegin != NULL) {
+                const char *miscTextEnd = str;
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+                miscTextBegin = NULL;
+            }
+            
+            ADVANCE_N(str,5,line,col);
+            while (*str && isspace(*str)) ADVANCE(str,line,col);
+
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_BREAK, .line = line, .column = col, .file = debugFileName  });
+        }
+        
+        else if (tokenStrCmp(str, "continue") == 0)
+        {
+            if (miscTextBegin != NULL) {
+                const char *miscTextEnd = str;
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+                miscTextBegin = NULL;
+            }
+            
+            ADVANCE_N(str,strlen("continue"),line,col);
+            while (*str && isspace(*str)) ADVANCE(str,line,col);
+            
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_CONTINUE, .line = line, .column = col, .file = debugFileName  });
+        }
+        
+        else if (tokenStrCmp(str, "return") == 0)
+        {
+            if (miscTextBegin != NULL) {
+                const char *miscTextEnd = str;
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
                 
                 miscTextBegin = NULL;
             }
 
-            str += 3;
+            ADVANCE_N(str,strlen("return"),line,col);
+            while (*str && isspace(*str)) ADVANCE(str,line,col);
+
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_RETURN, .line = line, .column = col, .file = debugFileName  });
+        }
+        else if (tokenStrCmp(str, "for") == 0) {
+            if (miscTextBegin != NULL) {
+                const char *miscTextEnd = str;
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
+                
+                miscTextBegin = NULL;
+            }
+
+            ADVANCE_N(str,3,line,col);
             
-            while (isspace(*str) && *str && str < max) str++;
+            while (isspace(*str) && *str && str < max) ADVANCE(str,line,col);
             
 
             TK_APPEND(&tks,
                 (StarToken){
                     .type = STAR_TOKEN_TYPE_FOR_LOOP,
+                    .line = line,
+                    .column = col, .file = debugFileName ,
              });
         }
 
-        else if (strncmp(str, "if", 2) == 0) {
+        else if (tokenStrCmp(str, "if") == 0) {
             if (miscTextBegin != NULL) {
                 const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
                 
                 miscTextBegin = NULL;
             }
 
-            str += 2;
+            ADVANCE_N(str,2,line,col);
             
-            while (isspace(*str) && *str && str < max) str++;
+            while (isspace(*str) && *str && str < max) ADVANCE(str,line,col);
             
 
             TK_APPEND(&tks,
                 (StarToken){
                     .type = STAR_TOKEN_TYPE_IF,
+                    .line = line,
+                    .column = col, .file = debugFileName ,
              });
         }
-        else if (strncmp(str, "else", 4) == 0) {
+        else if (tokenStrCmp(str, "else") == 0) {
             if (miscTextBegin != NULL) {
                 const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
                 
                 miscTextBegin = NULL;
             }
 
-            str += 4;
+            ADVANCE_N(str,4,line,col);
             
-            while (isspace(*str) && *str && str < max) str++;
+            while (isspace(*str) && *str && str < max) ADVANCE(str,line,col);
             
 
             TK_APPEND(&tks,
                 (StarToken){
                     .type = STAR_TOKEN_TYPE_ELSE,
+                    .line = line, .column = col,
+                    .file = debugFileName,
              });
         }
-        else if (strncmp(str, "defer", 5) == 0) {
+        else if (tokenStrCmp(str, "defer") == 0) {
             if (miscTextBegin != NULL) {
                 const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
                 
                 miscTextBegin = NULL;
             }
 
-            str += 5;
+            ADVANCE_N(str,5,line,col);
             
-            while (isspace(*str) && *str && str < max) str++;
+            while (isspace(*str) && *str && str < max) ADVANCE(str,line,col);
 
             const char* begin = str;
             
@@ -293,7 +349,7 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
             if (*str == '{')
             {
                 while (*str && str < max) {
-                    str++;
+                    ADVANCE(str,line,col);
 
                     if (*str == '{') { depth++; }
                     else if (*str == '}') { 
@@ -302,11 +358,14 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
                     }
                 }
             } else {
-                while (*str && str < max && *str != ';') str++;
-                if (!*str) return -1;
+                while (*str && str < max && *str != ';') ADVANCE(str,line,col);
+                if (!*str) {
+                    fprintf(stderr, TERM_RED"ERROR"TERM_RESET": Unexpected EOF\n");
+                    return -1;
+                }
             }
 
-            str++; // ;/}, include it in the defer text
+            ADVANCE(str,line,col); // ;/}, include it in the defer text
             const char* end = str;
 
             TK_APPEND(&tks,
@@ -314,40 +373,43 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
                     .type = STAR_TOKEN_TYPE_DEFER,
                     .begin = begin,
                     .end = end,
+                    .line = line, .column = col, .file = debugFileName,
              });
         }
-        else if (strncmp(str, "while", 5) == 0) {
+        else if (tokenStrCmp(str, "while") == 0) {
             if (miscTextBegin != NULL) {
                 const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
                 
                 miscTextBegin = NULL;
             }
 
-            str += 5;
+            ADVANCE_N(str,5,line,col);
             
-            while (isspace(*str) && *str && str < max) str++;
+            while (isspace(*str) && *str && str < max) ADVANCE(str,line,col);
             
             TK_APPEND(&tks,
                 (StarToken){
                     .type = STAR_TOKEN_TYPE_WHILE_LOOP,
+                    .line = line, .column = col, .file = debugFileName,
              });
         }
-        else if (strncmp(str, "do", 2) == 0) {
+        else if (tokenStrCmp(str, "do") == 0) {
             if (miscTextBegin != NULL) {
                 const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
                 
                 miscTextBegin = NULL;
             }
 
-            str += 2;
+            ADVANCE_N(str,2,line,col);
             
-            while (isspace(*str) && *str && str < max) str++;
+            while (isspace(*str) && *str && str < max) ADVANCE(str,line,col);
             
             TK_APPEND(&tks,
                 (StarToken){
                     .type = STAR_TOKEN_TYPE_DO,
+                    .line = line, .column = col, .file = debugFileName,
              });
         }
 
@@ -355,7 +417,7 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
         else if (isalpha(*str) || *str == '_') {
             if (miscTextBegin != NULL) {
                 const char *miscTextEnd = str;
-                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
+                TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
                 
                 miscTextBegin = NULL;
             }
@@ -367,20 +429,20 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
                 end++;
             }
             
-            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_IDENT, .begin = beg, .end = end });
+            TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_IDENT, .begin = beg, .end = end, .line = line, .column = col, .file = debugFileName  });
             
             str = end;
         }
 
         else { /* Don't set if we're already tracking */
             if (!miscTextBegin) miscTextBegin = str;
-            str++;
+            if (*str == '"') abort();
+            ADVANCE(str,line,col);
         }
     }
 
     for (u32 i = 0; i < tks.tokenCount; i++) {
         if (tks.tokens[i].type != STAR_TOKEN_TYPE_DO) continue;
-        
         /* Find its corresponding while and patch it */
 
         /**
@@ -394,18 +456,41 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
           */
 
           bool singleStatement = tks.tokens[i+1].type != STAR_TOKEN_TYPE_OPEN_BRACE;
+
           /**
             * If it is a single statement loop:
             * Like do j++ while (j > 0);
             * Simply look forward until the first semicolon
             */
         if (singleStatement) {
-            u32 j = i+1;
-            while (tks.tokens[j].type != STAR_TOKEN_TYPE_SEMI_COLON) j++;
-            j++;
+            u32 j = i;
+            bool found = false;
+            while (j < tks.tokenCount) {
+                if (tks.tokens[j].type == STAR_TOKEN_TYPE_SEMI_COLON) {
+                    found = true;
+                    break;
+                }
+                j++;
+            }
 
-            assert(j < tks.tokenCount);
-            assert(tks.tokens[j].type == STAR_TOKEN_TYPE_WHILE_LOOP);
+            if (!found) {
+                fprintf(stderr, "[%s:%zu] "TERM_RED"ERROR"TERM_RESET": Unexpected EOF while looking for the semicolon for single statement do while that starts here: [%s:%zu:%zu]\n", tks.tokens[j-1].file, tks.tokens[j-1].line, tks.tokens[i].file, tks.tokens[i].line, tks.tokens[i].column);
+                return -1;
+            }
+
+            found = false;
+            while (j < tks.tokenCount) {
+                if (tks.tokens[j].type == STAR_TOKEN_TYPE_WHILE_LOOP) {
+                    found = true;
+                    break;
+                }
+                j++;
+            }
+            if (!found) {
+                fprintf(stderr, "[%s:%zu] "TERM_RED"ERROR"TERM_RESET": No matching while for this do\n", tks.tokens[i].file, tks.tokens[i].line);
+                return -1;
+            }
+            if (EXPECT(tks.tokens[j], STAR_TOKEN_TYPE_WHILE_LOOP)) return -1;
 
             tks.tokens[j].type = STAR_TOKEN_TYPE_WHILE_PATCHED; /* patched */
         } else {
@@ -414,6 +499,8 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
               */
             i64 depth = 0;
             u32 j = i+1;
+
+            bool found = false;
             for (; j < tks.tokenCount; j++) {
                 StarToken* fwd = &tks.tokens[j];
     
@@ -422,13 +509,18 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
                 }
                 else if (fwd->type == STAR_TOKEN_TYPE_CLOSE_BRACE) {
                     depth--;
-                    if (depth == 0) break;
+                    if (depth == 0) {found=true; break;}
                 }
+            }
+
+            if (!found) {
+                fprintf(stderr, "[%s:%zu] "TERM_RED"ERROR"TERM_RESET": Unexpected EOF\n", tks.tokens[i+1].file, tks.tokens[i+1].line);
+                return -1;
             }
             // fprintf(stderr, "glooby: ");
             // StarTokenPrint(stderr, &tks.tokens[j+1]);
 
-            assert(tks.tokens[j+1].type == STAR_TOKEN_TYPE_WHILE_LOOP);
+            if (EXPECT(tks.tokens[j+1], STAR_TOKEN_TYPE_WHILE_LOOP)) return -1;
             tks.tokens[j+1].type = STAR_TOKEN_TYPE_WHILE_PATCHED; /* patched */
         }
     }
@@ -458,23 +550,28 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
         if (type != STAR_TOKEN_TYPE_IF && type != STAR_TOKEN_TYPE_WHILE_LOOP && type != STAR_TOKEN_TYPE_FOR_LOOP) { continue; }
 
         i++;
-        assert(tks.tokens[i].type == STAR_TOKEN_TYPE_OPEN_PAREN);
+        if (EXPECT(tks.tokens[i], STAR_TOKEN_TYPE_OPEN_PAREN)) return -1;
 
         /* Find index of closing parenthesis*/
         i64 depth = 0;
         u32 j = i+1;
+
+        bool found = false;
         for (; j < tks.tokenCount; j++) {
             StarToken* peek = &tks.tokens[j];
             if (peek->type == STAR_TOKEN_TYPE_OPEN_PAREN)
                 depth++;
             else if (peek->type == STAR_TOKEN_TYPE_CLOSE_PAREN) {
-                if (depth == 0) break;
+                if (depth == 0) {found = true; break;}
                 else depth--;
             }
         }
 
         j++;
-        assert(j < tks.tokenCount);
+        if (!found) {
+            fprintf(stderr, "[%s:%zu] "TERM_RED"ERROR"TERM_RESET": Unexpected EOF\n", tks.tokens[i+1].file, tks.tokens[i+1].line);
+            return -1;
+        }
 
         /* already braced, skip */
         if (tks.tokens[j].type == STAR_TOKEN_TYPE_OPEN_BRACE) continue;
@@ -483,8 +580,19 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
         tks.tokens[j-1].flags |= STAR_TOKEN_SUFFIX_OPEN_BRACE;
 
         /* find the semicolon (statement end) and suffix it with the close brace*/
-        while (tks.tokens[j].type != STAR_TOKEN_TYPE_SEMI_COLON && j < tks.tokenCount) j++;
-        if (j >= tks.tokenCount) return -1;
+        found = false;
+        while (j < tks.tokenCount) {
+            if (tks.tokens[j].type == STAR_TOKEN_TYPE_SEMI_COLON) {
+                found = true;
+                break;
+            }
+            j++;
+        }
+
+        if (!found) {
+            fprintf(stderr, "[%s:%zu] "TERM_RED"ERROR"TERM_RESET": Unexpected EOF\n", tks.tokens[i+1].file, tks.tokens[i+1].line);
+            return -1;
+        }
         
         /* suffix semicolon with close brace */
         tks.tokens[j].flags |= STAR_TOKEN_SUFFIX_CLOSE_BRACE;
@@ -495,7 +603,7 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
     
     if (miscTextBegin != NULL) {
         const char *miscTextEnd = str;
-        TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd });
+        TK_APPEND(&tks, (StarToken){ .type = STAR_TOKEN_TYPE_MISC, .begin = miscTextBegin, .end = miscTextEnd, .line = line, .column = col, .file = debugFileName  });
         
         miscTextBegin = NULL;
     }
@@ -504,6 +612,7 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
 }
 
 void StarTokenPrint(FILE* f, const StarToken *tk) {
+    fprintf(f, "[%s:%zu:%zu] ", tk->file, tk->line, tk->column); 
     if (tk->type == STAR_TOKEN_TYPE_FOR_LOOP) {
         fprintf(f, "for ");
     }
@@ -538,16 +647,17 @@ void StarTokenPrint(FILE* f, const StarToken *tk) {
         fprintf(f, "do ");
     }
     else if (tk->type == STAR_TOKEN_TYPE_IDENT || tk->type == STAR_TOKEN_TYPE_MISC) {
-        fprintf(f, " %.*s ", (int)(tk->end - tk->begin), tk->begin);
+        fprintf(f, "(%s)%.*s ", tk->type == STAR_TOKEN_TYPE_IDENT ? "IDENT" : "MISC", (int)(tk->end - tk->begin), tk->begin);
     }
     else if (tk->type == STAR_TOKEN_TYPE_SEMI_COLON) { fprintf(f, ";"); }
-    else if (tk->type == STAR_TOKEN_TYPE_OPEN_PAREN) { fprintf(f, " OPEN PAREN( "); }
+    else if (tk->type == STAR_TOKEN_TYPE_OPEN_PAREN) { fprintf(f, " ( "); }
     else if (tk->type == STAR_TOKEN_TYPE_CLOSE_PAREN) { fprintf(f, " ) "); }
     else if (tk->type == STAR_TOKEN_TYPE_OPEN_BRACE) { fprintf(f, " {\n"); }
     else if (tk->type == STAR_TOKEN_TYPE_CLOSE_BRACE) { fprintf(f, " }\n"); }
     else {
         fprintf(stderr, "Unknown token type: %i\n", tk->type);
     }
+    fputc('\n', f);
 }
 
 void StarTokensFree(StarToken* tokens, u32 nTokens)
@@ -674,6 +784,7 @@ static inline int instantiateAllDefers(StarParser* p, Output* o) {
     return 0;
 }
 
+/* Instantiate defers declared in the current scope */
 static inline int instantiateCurrentDefers(StarParser* p, Output* o) {
     if (p->currentScope == 0) return -1;
 
@@ -687,6 +798,7 @@ static inline int instantiateCurrentDefers(StarParser* p, Output* o) {
     return 0;
 }
 
+/* Instantiate all defers from current level to the specific level (excluding it) */
 static inline int instantiateNDefers(StarParser* p, u32 level, Output* o) {
     if (p->currentScope == 0) return -1;
         for (i64 i = (i64)p->currentScope; i > level; i--) {
@@ -708,8 +820,11 @@ int StarParse(const StarToken* tokens, u32 nTokens, StarParser* p, char** outBuf
         .bufferSize = 0,
     };
 
-    u32 loopScopeLevel[1024];
-    u32 x = 0;
+    /**
+      * The scope levels which loops reside in
+      */
+    u32 loopScopeLevelStack[1024];
+    u32 loopScope = 0;
 
     for (u32 i = 0; i < nTokens; i++) {
         const StarToken* tk = &tokens[i];
@@ -729,6 +844,7 @@ int StarParse(const StarToken* tokens, u32 nTokens, StarParser* p, char** outBuf
                     scope->deferCapacity = newCapacity;
                 }
 
+                /* Track the defer */
                 scope->defers[scope->deferCount++] = (StarDefer){ .begin = tk->begin, .end = tk->end, .scope = p->currentScope };
                 break;
             }
@@ -736,7 +852,7 @@ int StarParse(const StarToken* tokens, u32 nTokens, StarParser* p, char** outBuf
             case STAR_TOKEN_TYPE_FOR_LOOP: {
                 outStr(p, &o, " for ", SIZE_MAX);
 
-                loopScopeLevel[x++] = p->currentScope;
+                loopScopeLevelStack[loopScope++] = p->currentScope;
                 break;
             }
 
@@ -751,7 +867,7 @@ int StarParse(const StarToken* tokens, u32 nTokens, StarParser* p, char** outBuf
             }
             case STAR_TOKEN_TYPE_WHILE_LOOP: {
                 outStr(p, &o, " while ", SIZE_MAX);
-                loopScopeLevel[x++] = p->currentScope;
+                loopScopeLevelStack[loopScope++] = p->currentScope;
                 break;
             }
 
@@ -765,7 +881,7 @@ int StarParse(const StarToken* tokens, u32 nTokens, StarParser* p, char** outBuf
             }
             case STAR_TOKEN_TYPE_DO: {
                 outStr(p, &o, " do ", SIZE_MAX);
-                loopScopeLevel[x++] = p->currentScope;
+                loopScopeLevelStack[loopScope++] = p->currentScope;
                 break;
             }
 
@@ -775,14 +891,19 @@ int StarParse(const StarToken* tokens, u32 nTokens, StarParser* p, char** outBuf
                 outStr(p, &o, " return ", SIZE_MAX);
                 break;
             }
+
+            /* Instantiate all defers declared in the latest loop */
             case STAR_TOKEN_TYPE_CONTINUE: {
-                instantiateNDefers(p, loopScopeLevel[x-1], &o);
+                instantiateNDefers(p, loopScopeLevelStack[loopScope-1], &o);
+
                 outStr(p, &o, " continue ", SIZE_MAX);
                 break;
             }
 
+            /* Instantiate all defers declared in the latest loop */
             case STAR_TOKEN_TYPE_BREAK: {
-                instantiateNDefers(p, loopScopeLevel[x-1], &o);
+                instantiateNDefers(p, loopScopeLevelStack[loopScope-1], &o);
+
                 outStr(p, &o, " break ", SIZE_MAX);
                 break;
             }
@@ -804,8 +925,8 @@ int StarParse(const StarToken* tokens, u32 nTokens, StarParser* p, char** outBuf
                 StarParserPopDeferScope(p);
                 outStr(p, &o, "}", SIZE_MAX);
 
-                while (loopScopeLevel[x] >= p->currentScope && x > 0) {
-                    x--;
+                while (loopScopeLevelStack[loopScope] >= p->currentScope && loopScope > 0) {
+                    loopScope--;
                 }
                 break;
             }
@@ -902,7 +1023,7 @@ read_file_arena_better(FILE* f)
 #ifndef STARC_NO_MAIN
 
 int main(int argc, char *argv[]) {
-    fprintf(stderr, "StarC parser v%i.%i.%i\n"TERM_YELLOW"WARNING"TERM_RESET": Ensure your main function ends with a return 0, can result in weird behavior otherwise.\n", STARC_MAJOR, STARC_MINOR, STARC_PATCH);
+    fprintf(stderr, "StarC parser v%i.%i.%i\n", STARC_MAJOR, STARC_MINOR, STARC_PATCH);
 
     const char* file = NULL;
     const char* outf = NULL;
@@ -948,14 +1069,20 @@ int main(int argc, char *argv[]) {
         
         StarToken* tokens = NULL;
         size_t     nTokens = 0;
-        int e = StarLexicalize(s, SIZE_MAX, &tokens, &nTokens);
-        assert(e == 0);
+        int e = StarLexicalize(s, SIZE_MAX, file, &tokens, &nTokens);
+        if (e != 0) {
+            fprintf(stderr, TERM_RED"ERROR"TERM_RESET": Failed to tokenize file: %s\n", file);
+            continue;
+        }
 
         StarParser p;
         StarParserInit(&p);
     
         char *buffer = NULL;
-        assert(StarParse(tokens, nTokens, &p, &buffer, NULL) == 0);
+        if (StarParse(tokens, nTokens, &p, &buffer, NULL) != 0) {
+            fprintf(stderr, TERM_RED"ERROR"TERM_RESET": Failed to parse %s\n", file);
+            continue;
+        }
 
         fputs(buffer, outfile);
 

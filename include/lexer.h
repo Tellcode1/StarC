@@ -49,7 +49,7 @@ typedef struct StarToken {
   * Lexicalize the given string, reading no more than maxStr.
   * The outTokens array is allocated with malloc and must be freed.
   */
-int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t* nTokens);
+int StarLexicalize(const char* str, size_t maxStr, const char* debugFileName, StarToken** outTokens, size_t* nTokens);
 
 /**
   * Print a given token
