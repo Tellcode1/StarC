@@ -2,6 +2,7 @@
 #define STARC_STD_H
 
 #include <stdint.h>
+#include <stdlib.h>
 
 #ifndef STAR_C_INTEGER_ALIASES_DEFINED
 typedef uint64_t u64;
@@ -23,5 +24,9 @@ typedef double f64;
 #define TERM_GREEN   "\x1b[32m"
 #define TERM_RED     "\x1b[31m"
 #define TERM_RESET   "\033[0m"
+
+#define STARC_MAJOR 0
+#define STARC_MINOR 1
+#define STARC_PATCH 1
 
 #endif//STARC_STD_H

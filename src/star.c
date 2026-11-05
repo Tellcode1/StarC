@@ -7,8 +7,10 @@
 #include <ctype.h>
 #include <assert.h>
 #include <errno.h>
+#include <stdbool.h>
 
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 typedef struct Tokens {
     size_t tokenCapacity;
@@ -48,7 +50,6 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
     const char* miscTextBegin = NULL;
     while (*str && str < max)
     {
-        // fprintf(stderr, "%s\n", str);
         while (isspace(*str) && *str && str < max) str++;
 
         if (*str == '#') {
@@ -235,16 +236,6 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
             TK_APPEND(&tks,
                 (StarToken){
                     .type = STAR_TOKEN_TYPE_FOR_LOOP,
-                    /*
-                    .forInitializersBegin = initializersBegin,
-                    .forInitializersEnd = initializersEnd,
-                    .conditionsBegin = conditionsBegin,
-                    .conditionsEnd = conditionsEnd,
-                    .forIteratorsBegin = iteratorsBegin,
-                    .forIteratorsEnd = iteratorsEnd,
-                    .begin = bodyBegin,
-                    .end = bodyEnd,
-                    */
              });
         }
 
@@ -340,12 +331,6 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
             TK_APPEND(&tks,
                 (StarToken){
                     .type = STAR_TOKEN_TYPE_WHILE_LOOP,
-                    /*
-                    .conditionsBegin = conditionsBegin,
-                    .conditionsEnd = conditionsEnd,
-                    .begin = bodyBegin,
-                    .end = bodyEnd,
-                    */
              });
         }
         else if (strncmp(str, "do", 2) == 0) {
@@ -463,10 +448,8 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
             if (tks.tokens[i+1].type == STAR_TOKEN_TYPE_OPEN_BRACE) { continue; }
 
             tks.tokens[i].flags |= STAR_TOKEN_SUFFIX_OPEN_BRACE;
-            // StarTokenPrint(stderr, &tks.tokens[i+1]);
-            // fputc('\n', stderr);
 
-            u32 j = i+2;
+            u32 j = i+1; // after the do
             while (tks.tokens[j].type != STAR_TOKEN_TYPE_SEMI_COLON && j < tks.tokenCount) j++;
             tks.tokens[j].flags |= STAR_TOKEN_SUFFIX_CLOSE_BRACE;
 
@@ -499,16 +482,10 @@ int StarLexicalize(const char* str, size_t maxStr, StarToken** outTokens, size_t
         /* else, suffix the close parenthesis with an open brace */
         tks.tokens[j-1].flags |= STAR_TOKEN_SUFFIX_OPEN_BRACE;
 
-        // StarTokenPrint(stderr, &tks.tokens[j-1]);
-        // fputc('\n', stderr);
-        
         /* find the semicolon (statement end) and suffix it with the close brace*/
         while (tks.tokens[j].type != STAR_TOKEN_TYPE_SEMI_COLON && j < tks.tokenCount) j++;
         if (j >= tks.tokenCount) return -1;
         
-        // StarTokenPrint(stderr, &tks.tokens[j]);
-        // fputc('\n', stderr);
-
         /* suffix semicolon with close brace */
         tks.tokens[j].flags |= STAR_TOKEN_SUFFIX_CLOSE_BRACE;
     }
@@ -560,7 +537,6 @@ void StarTokenPrint(FILE* f, const StarToken *tk) {
     else if (tk->type == STAR_TOKEN_TYPE_DO) {
         fprintf(f, "do ");
     }
-    // STAR_TOKEN_TYPE_DEFER
     else if (tk->type == STAR_TOKEN_TYPE_IDENT || tk->type == STAR_TOKEN_TYPE_MISC) {
         fprintf(f, " %.*s ", (int)(tk->end - tk->begin), tk->begin);
     }
@@ -578,6 +554,281 @@ void StarTokensFree(StarToken* tokens, u32 nTokens)
 {
     /* Tokens are just read only copies :3 */
     free(tokens);
+}
+
+
+StarNodeID StarNodeCreate(StarParser* p)
+{
+    if (p->nodeCount + 1 >= p->nodeCapacity) {
+        size_t newCapacity = p->nodeCapacity * 2;
+        if (newCapacity == 0) newCapacity = 64;
+        
+        StarNode* newNodes = realloc(p->nodes, newCapacity * sizeof(StarNode));
+        if (!newNodes) return -1;
+        
+        p->nodes = newNodes;
+        p->nodeCapacity = newCapacity;
+    }
+    
+    i32 i = (i32)p->nodeCount++;
+    
+    memset(&p->nodes[i], 0, sizeof(StarNode));
+    
+    return (StarNodeID)i;
+}
+
+u32 StarParserPushDeferScope(StarParser* p)
+{
+    u32 scope = ++p->currentScope;
+    
+    p->deferStacks[scope] = (StarDeferStack){
+        .defers = calloc(sizeof(StarDefer), 64),
+        .deferCount = 0,
+        .deferCapacity = 64,
+    };
+    return scope;
+}
+
+void StarParserPopDeferScope(StarParser* p)
+{
+    u32 scope = p->currentScope;
+    if (scope == 0){ p->deferStacks[0].deferCount = 0; return;}
+
+    free(p->deferStacks[scope].defers);
+    
+    p->currentScope--;
+}
+
+int StarParserInit(StarParser* p)
+{
+    *p = (StarParser){
+        .nodes = calloc(sizeof(StarNode), 64),
+        .nodeCount = 0,
+        .nodeCapacity = 64,    
+        .currentScope = 0,
+        .deferStacks = calloc(sizeof(StarDeferStack), 8),
+        .deferStackCount = 0,
+        .deferStackCapacity = 8,
+    };
+    return p->nodes != NULL && p->deferStacks != NULL ? 0 : -1;
+}
+
+void StarParserFree(StarParser* p) {
+    free(p->nodes);
+    free(p->deferStacks);
+}
+
+typedef struct Output
+{
+    char *buffer;
+    size_t bufferSize;
+    size_t bufferCapacity;
+} Output;
+
+static inline int outStr(StarParser* p, Output* o, const char* s, size_t max) {
+    size_t slen = MIN(max, strlen(s));
+
+    if (o->bufferSize + slen >= o->bufferCapacity)
+    {
+        size_t newCapacity = MAX((o->bufferCapacity * 2), (o->bufferSize + slen));
+        char* newS = realloc(o->buffer, newCapacity+1);
+        if (!newS) return -1;
+
+        o->buffer = newS;
+        o->bufferCapacity = newCapacity;
+    }
+
+    memcpy(&o->buffer[o->bufferSize], s, slen);
+    o->bufferSize += slen;
+
+    o->buffer[o->bufferSize] = 0;
+
+    return 0;
+}
+
+static inline int outChr(Output* o, char c) {
+    if (o->bufferSize + 1 >= o->bufferCapacity)
+    {
+        size_t newCapacity = MAX((o->bufferCapacity * 2), 128);
+        char* newS = realloc(o->buffer, newCapacity+1);
+        if (!newS) return -1;
+
+        o->buffer = newS;
+        o->bufferCapacity = newCapacity;
+    }
+
+    o->buffer[o->bufferSize++] = c;
+    o->buffer[o->bufferSize] = 0;
+
+    return 0;
+}
+
+static inline int instantiateAllDefers(StarParser* p, Output* o) {
+    for (i64 i = (i64)p->currentScope; i >= 0; i--) {
+        const StarDeferStack* d = &p->deferStacks[i];
+        for (i64 j = (i64)d->deferCount-1; j >= 0; j--) {
+            outStr(p, o, d->defers[j].begin, d->defers[j].end - d->defers[j].begin);
+        }
+    }
+
+    return 0;
+}
+
+static inline int instantiateCurrentDefers(StarParser* p, Output* o) {
+    if (p->currentScope == 0) return -1;
+
+    const StarDeferStack* d = &p->deferStacks[p->currentScope];
+    for (i64 j = (i64)d->deferCount-1; j >= 0; j--) {
+        if (d->defers[j].scope != p->currentScope) break;
+
+        outStr(p, o, d->defers[j].begin, d->defers[j].end - d->defers[j].begin);
+    }
+
+    return 0;
+}
+
+static inline int instantiateNDefers(StarParser* p, u32 level, Output* o) {
+    if (p->currentScope == 0) return -1;
+        for (i64 i = (i64)p->currentScope; i > level; i--) {
+        const StarDeferStack* d = &p->deferStacks[i];
+
+        for (i64 j = (i64)d->deferCount-1; j >= 0; j--) {
+
+            outStr(p, o, d->defers[j].begin, d->defers[j].end - d->defers[j].begin);
+        }
+    }
+
+    return 0;
+}
+
+int StarParse(const StarToken* tokens, u32 nTokens, StarParser* p, char** outBuffer, size_t* outBufferSize) {
+    Output o = {
+        .buffer = calloc(1,1024),
+        .bufferCapacity = 1023,
+        .bufferSize = 0,
+    };
+
+    u32 loopScopeLevel[1024];
+    u32 x = 0;
+
+    for (u32 i = 0; i < nTokens; i++) {
+        const StarToken* tk = &tokens[i];
+
+        switch (tokens[i].type) {
+
+            case STAR_TOKEN_TYPE_DEFER: {
+                StarDeferStack* scope = &p->deferStacks[p->currentScope];
+                if (scope->deferCount + 1 >= scope->deferCapacity) {
+                    size_t newCapacity = scope->deferCapacity * 2;
+                    if (newCapacity == 0) newCapacity = 64;
+
+                    StarDefer* newDefers = realloc(scope->defers, newCapacity * sizeof(StarDefer));
+                    if (!newDefers) return -1;
+
+                    scope->defers = newDefers;
+                    scope->deferCapacity = newCapacity;
+                }
+
+                scope->defers[scope->deferCount++] = (StarDefer){ .begin = tk->begin, .end = tk->end, .scope = p->currentScope };
+                break;
+            }
+
+            case STAR_TOKEN_TYPE_FOR_LOOP: {
+                outStr(p, &o, " for ", SIZE_MAX);
+
+                loopScopeLevel[x++] = p->currentScope;
+                break;
+            }
+
+            /* scopes for if/else/do/while/for are handled by the braces */ 
+            case STAR_TOKEN_TYPE_IF: {
+                outStr(p, &o, " if ", SIZE_MAX);
+                break;
+            }
+            case STAR_TOKEN_TYPE_ELSE: {
+                outStr(p, &o, " else ", SIZE_MAX);
+                break;
+            }
+            case STAR_TOKEN_TYPE_WHILE_LOOP: {
+                outStr(p, &o, " while ", SIZE_MAX);
+                loopScopeLevel[x++] = p->currentScope;
+                break;
+            }
+
+            /**
+              * do pushes the scope, while just parses normally. We run
+              * an additional pass to patch all do {} while loops;
+              */
+            case STAR_TOKEN_TYPE_WHILE_PATCHED: {
+                outStr(p, &o, " while ", SIZE_MAX);
+                break;
+            }
+            case STAR_TOKEN_TYPE_DO: {
+                outStr(p, &o, " do ", SIZE_MAX);
+                loopScopeLevel[x++] = p->currentScope;
+                break;
+            }
+
+            case STAR_TOKEN_TYPE_RETURN: {
+                instantiateAllDefers(p, &o);
+
+                outStr(p, &o, " return ", SIZE_MAX);
+                break;
+            }
+            case STAR_TOKEN_TYPE_CONTINUE: {
+                instantiateNDefers(p, loopScopeLevel[x-1], &o);
+                outStr(p, &o, " continue ", SIZE_MAX);
+                break;
+            }
+
+            case STAR_TOKEN_TYPE_BREAK: {
+                instantiateNDefers(p, loopScopeLevel[x-1], &o);
+                outStr(p, &o, " break ", SIZE_MAX);
+                break;
+            }
+
+            case STAR_TOKEN_TYPE_OPEN_PAREN: outStr(p, &o, "(", SIZE_MAX); break;
+            case STAR_TOKEN_TYPE_SEMI_COLON: outStr(p, &o, ";", SIZE_MAX); break;
+            
+            case STAR_TOKEN_TYPE_CLOSE_PAREN:
+                outStr(p, &o, ")", SIZE_MAX);
+                break;
+
+            case STAR_TOKEN_TYPE_OPEN_BRACE:
+                p->currentScope = StarParserPushDeferScope(p);
+                outStr(p, &o, "{", SIZE_MAX);
+                break;
+
+            case STAR_TOKEN_TYPE_CLOSE_BRACE: {
+                instantiateCurrentDefers(p, &o);
+                StarParserPopDeferScope(p);
+                outStr(p, &o, "}", SIZE_MAX);
+
+                while (loopScopeLevel[x] >= p->currentScope && x > 0) {
+                    x--;
+                }
+                break;
+            }
+            case STAR_TOKEN_TYPE_MISC:
+                outChr(&o, ' ');
+                outStr(p, &o, tk->begin, tk->end - tk->begin);
+                outChr(&o, ' ');
+                break;
+            case STAR_TOKEN_TYPE_IDENT:
+                outChr(&o, ' ');
+                outStr(p, &o, tk->begin, tk->end - tk->begin);
+                outChr(&o, ' ');
+                break;
+        }
+        if ((tk->flags & STAR_TOKEN_SUFFIX_OPEN_BRACE) != 0) outChr(&o, '{');
+        if ((tk->flags & STAR_TOKEN_SUFFIX_CLOSE_BRACE) != 0) outChr(&o, '}');
+    }
+    
+    
+    if (outBuffer) *outBuffer = o.buffer; else free(o.buffer);
+    if (outBufferSize) *outBufferSize = o.bufferSize;
+
+    return 0;
 }
 
 static inline size_t
@@ -648,9 +899,7 @@ read_file_arena_better(FILE* f)
   return buffer;
 }
 
-#define STARC_MAJOR 0
-#define STARC_MINOR 1
-#define STARC_PATCH 0
+#ifndef STARC_NO_MAIN
 
 int main(int argc, char *argv[]) {
     fprintf(stderr, "StarC parser v%i.%i.%i\n"TERM_YELLOW"WARNING"TERM_RESET": Ensure your main function ends with a return 0, can result in weird behavior otherwise.\n", STARC_MAJOR, STARC_MINOR, STARC_PATCH);
@@ -701,13 +950,7 @@ int main(int argc, char *argv[]) {
         size_t     nTokens = 0;
         int e = StarLexicalize(s, SIZE_MAX, &tokens, &nTokens);
         assert(e == 0);
-        
-        // fprintf(stderr, "%zu GLOOBY WARNING GLOOBY WARNING \n", nTokens);
-        // for (u32 j = 0; j < nTokens; j++) {
-        //     StarTokenPrint(stderr, &tokens[j]);
-        // }
-        // fprintf(stderr, "%zu GLOOBY NO NO NO GLOOBY NO NO NO n", nTokens);
-        
+
         StarParser p;
         StarParserInit(&p);
     
@@ -733,3 +976,5 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+
+#endif // STARC_NO_MAIN

@@ -33,6 +33,11 @@ int main(int argc, char** argv) {
 
     int j = 10;
     do {
+        /**
+          * This will run in both cases:
+          * if execution proceeds normally into the closing brace
+          * and if the break is encountered.
+          */
         defer fprintf(stderr, "ligma: %i\n", j);
         j--;
         if (j == 5) break;
